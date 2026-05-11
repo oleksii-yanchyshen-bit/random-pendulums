@@ -1,0 +1,54 @@
+name: Daily pendulum
+
+# Posts a fresh randomized chain-pendulum-network animation to the
+# Telegram channel once per day.
+
+on:
+  schedule:
+    # 12:00 UTC daily.  GitHub cron is best-effort: a run may be
+    # delayed by several minutes during peak hours, occasionally more.
+    - cron: "0 12 * * *"
+  # Allow manual triggering from the Actions tab — handy for testing.
+  workflow_dispatch:
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Generate and post
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHANNEL: ${{ secrets.TG_CHANNEL }}
+        run: |
+          python generate_pendulum_simulation.py \
+              -T "$TG_TOKEN" -N "$TG_CHANNEL" \
+              -V \
+              --max-attempts 30 \
+              --attempt-timeout 180 \
+              -o pendulum.mp4
+
+      # Upload the produced animation as a workflow artifact so we can
+      # download and inspect it later (helpful when something looks off
+      # in the channel).  Artifacts expire after 7 days.
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pendulum-${{ github.run_id }}
+          path: pendulum.*
+          if-no-files-found: ignore
+          retention-days: 7
