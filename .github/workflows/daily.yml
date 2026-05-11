@@ -7,7 +7,7 @@ on:
   schedule:
     # 12:00 UTC daily.  GitHub cron is best-effort: a run may be
     # delayed by several minutes during peak hours, occasionally more.
-    - cron: "0 12 * * *"
+    - cron: "50 13 * * *"
   # Allow manual triggering from the Actions tab — handy for testing.
   workflow_dispatch:
 
