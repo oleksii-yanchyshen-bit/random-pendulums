@@ -55,6 +55,8 @@ ENABLE_TRAILS = True             # phosphor motion trails on chain tips
 ENABLE_ENERGY_COLOR = False       # colour links by kinetic energy
 ENABLE_DRIVEN_RESONANCE = True   # sometimes tune a driven pivot to the
                                  # chain's own frequency (resonant build-up)
+ENABLE_ADAPTIVE_DAMPING = True   # raise damping a bit for fast pivot drives
+                                 # (tames chaos + integrator cost)
 
 
 def _natural_freq(L: float, g: float = 9.8) -> float:
@@ -85,9 +87,9 @@ def _sample_drive(rng: np.random.Generator, pivot, L: float,
     if resonance and (force or rng.random() < 0.40):
         # Resonant drive: match the chain's frequency, moderate amplitude
         # (energy accumulates on its own, so a huge push can go unstable).
-        f = float(f_nat * rng.uniform(0.9, 1.1))
+        f = float(f_nat * rng.uniform(0.9, 5.1))
         freq_x = freq_y = f
-        amp_main = float(rng.uniform(1.5, 3.2))
+        amp_main = float(rng.uniform(0.5, 3.2))
         if rng.random() < 0.5:
             amp_x, amp_y = amp_main, float(rng.uniform(0.0, 1.0))
         else:
@@ -116,7 +118,8 @@ def _sample_drive(rng: np.random.Generator, pivot, L: float,
 def sample_parameters(rng: np.random.Generator,
                       star_topology: bool | None = None,
                       contrast_geometry: bool | None = None,
-                      driven_resonance: bool | None = None) -> dict:
+                      driven_resonance: bool | None = None,
+                      adaptive_damping: bool | None = None) -> dict:
     """Sample a random-but-reasonable network configuration.
 
     Returns a dict with ``chains``, ``springs``, ``connections`` ready
@@ -134,6 +137,8 @@ def sample_parameters(rng: np.random.Generator,
         contrast_geometry = ENABLE_CONTRAST_GEOMETRY
     if driven_resonance is None:
         driven_resonance = ENABLE_DRIVEN_RESONANCE
+    if adaptive_damping is None:
+        adaptive_damping = ENABLE_ADAPTIVE_DAMPING
     n_springs = int(rng.choice([1, 2, 3], p=[0.55, 0.30, 0.15]))
 
     # Spring anchor positions.
@@ -263,12 +268,34 @@ def sample_parameters(rng: np.random.Generator,
                 connections.append({"chain": ci, "joint": N, "spring": j})
                 n_bridges += 1
 
-    # Damping fixed at a very small value: motion lasts the full
-    # simulation window and chains keep transferring energy back and
-    # forth instead of settling down.  Below ~1e-4 the system is
-    # effectively conservative and visually identical, so 1e-3 is the
-    # sweet spot — still measurable but never noticeably dissipative.
+    # Damping is normally tiny (0.001): motion lasts the full simulation
+    # window and chains keep transferring energy back and forth instead of
+    # settling down.  Below ~1e-4 the system is effectively conservative
+    # and visually identical, so 1e-3 is the sweet spot — still measurable
+    # but never noticeably dissipative.
     d = 0.001
+
+    # === FEATURE: adaptive damping (adaptive_damping=False to disable) === #
+    # Fast pivot drives pump a lot of energy in, which looks over-chaotic
+    # and makes the ODE expensive (the integrator is forced into tiny
+    # steps).  Bump damping up gently in proportion to the *fastest* drive
+    # actually in play.  Only frequencies above a knee are penalised, so
+    # low-frequency resonant drives keep their clean build-up undamped.
+    if adaptive_damping:
+        driven_freqs = []
+        for ch in chains:
+            drv = ch.get("pivot_drive")
+            if drv is None:
+                continue
+            fs = [f for a, f in zip(drv["amp"], drv["freq"]) if a > 1e-6]
+            if fs:
+                driven_freqs.append(max(fs))
+        if driven_freqs:
+            f_max = max(driven_freqs)
+            f_knee = 0.30                       # keep light default below this
+            d += 0.12 * max(0.0, f_max - f_knee)  # ~+0.03 at the fastest (0.55)
+    d = float(d)
+    # ==================================================================== #
 
     return {
         "chains": chains,
@@ -368,7 +395,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     p.add_argument("--max-attempts", type=int, default=20,
                    help="How many random configs to try before giving up")
-    p.add_argument("--attempt-timeout", type=int, default=60,
+    p.add_argument("--attempt-timeout", type=int, default=90,
                    help="Per-attempt simulation timeout in seconds (Unix only)")
 
     p.add_argument("--t-max", type=float, default=25.0,
@@ -395,6 +422,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Disable long-thin vs short-stubby geometry mixing")
     p.add_argument("--no-resonance", action="store_true",
                    help="Disable tuning driven pivots to chain resonance")
+    p.add_argument("--no-adaptive-damping", action="store_true",
+                   help="Disable raising damping for fast pivot drives")
     p.add_argument("--no-trails", action="store_true",
                    help="Disable phosphor motion trails on chain tips")
     p.add_argument("--no-energy-color", action="store_true",
@@ -429,6 +458,8 @@ def main(argv=None) -> int:
             star_topology=ENABLE_STAR_TOPOLOGY and not args.no_star,
             contrast_geometry=ENABLE_CONTRAST_GEOMETRY and not args.no_contrast,
             driven_resonance=ENABLE_DRIVEN_RESONANCE and not args.no_resonance,
+            adaptive_damping=(ENABLE_ADAPTIVE_DAMPING
+                              and not args.no_adaptive_damping),
         )
         n_springs = len(params["springs"])
         n_chains = len(params["chains"])
