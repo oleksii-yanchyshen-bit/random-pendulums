@@ -34,12 +34,19 @@ jobs:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHANNEL: ${{ secrets.TG_CHANNEL }}
         run: |
+          # Worst-case wall time is bounded by max-attempts x attempt-timeout
+          # plus one render, and must stay under the job's timeout-minutes
+          # (60).  16 x 100s = ~27 min leaves ample room for render + post.
+          # --t-max keeps each simulation cheap; --max-links skips scenes
+          # too big to simulate within the per-attempt budget.
           python generate_pendulum_simulation.py \
               -T "$TG_TOKEN" -N "$TG_CHANNEL" \
               -V \
-              --max-attempts 30 \
-              --attempt-timeout 180 \
-              -o pendulum.mp4
+              --max-attempts 16 \
+              --attempt-timeout 100 \
+              --t-max 16 \
+              --max-links 360 \
+              -o animation.mp4
 
       # Upload the produced animation as a workflow artifact so we can
       # download and inspect it later (helpful when something looks off
@@ -49,6 +56,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pendulum-${{ github.run_id }}
-          path: pendulum.*
+          path: animation.*
           if-no-files-found: ignore
           retention-days: 7

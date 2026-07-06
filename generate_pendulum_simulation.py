@@ -395,6 +395,9 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     p.add_argument("--max-attempts", type=int, default=20,
                    help="How many random configs to try before giving up")
+    p.add_argument("--max-links", type=int, default=0,
+                   help="Skip sampled scenes whose total link count exceeds "
+                        "this (keeps per-attempt sim time bounded). 0 = no cap")
     p.add_argument("--attempt-timeout", type=int, default=90,
                    help="Per-attempt simulation timeout in seconds (Unix only)")
 
@@ -461,6 +464,14 @@ def main(argv=None) -> int:
             adaptive_damping=(ENABLE_ADAPTIVE_DAMPING
                               and not args.no_adaptive_damping),
         )
+        # Skip scenes that are too big to simulate within the per-attempt
+        # budget.  Sampling is cheap, so burning an attempt here is far
+        # better than a guaranteed timeout mid-integration.
+        total_links = sum(c["N"] for c in params["chains"])
+        if args.max_links > 0 and total_links > args.max_links:
+            log.debug("attempt %d: %d links > --max-links %d — skipping",
+                      attempt, total_links, args.max_links)
+            continue
         n_springs = len(params["springs"])
         n_chains = len(params["chains"])
         n_bridges = sum(
