@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""
-generate_pendulum_simulation.py
-================================
-Generate a chain-pendulum-network animation with random initial
-conditions and (optionally) post it to a Telegram channel.
+# """
+# generate_pendulum_simulation.py
+# ================================
+# Generate a chain-pendulum-network animation with random initial
+# conditions and (optionally) post it to a Telegram channel.
 
-Inspired by https://github.com/robolamp/3_body_problem_bot
+# Inspired by https://github.com/robolamp/3_body_problem_bot
 
-Random configurations span 1-3 springs with 2-4 chains attached to each.
-When there are ≥ 2 springs, with some probability we also generate
-"bridge" chains connecting two springs together — both ends of the
-bridge are tied to springs, so its pivot is itself a free, dynamical
-point in space.
+# Random configurations span 1-3 springs with 2-4 chains attached to each.
+# When there are ≥ 2 springs, with some probability we also generate
+# "bridge" chains connecting two springs together — both ends of the
+# bridge are tied to springs, so its pivot is itself a free, dynamical
+# point in space.
 
-Without ``-T`` and ``-N`` arguments, the script just writes a GIF to disk.
-With them, it also publishes the GIF to the given Telegram channel.
+# Without ``-T`` and ``-N`` arguments, the script just writes a GIF to disk.
+# With them, it also publishes the GIF to the given Telegram channel.
 
-The first attempt that runs to completion is accepted, no quality
-filtering — with very low damping the system rarely produces a boring
-result, and visual judgment is subjective.
+# The first attempt that runs to completion is accepted, no quality
+# filtering — with very low damping the system rarely produces a boring
+# result, and visual judgment is subjective.
 
-Per-attempt timeout: extremely stiff springs (κ ≳ 10⁶) make the ODE
-arbitrarily hard, with oscillation periods below μs scale.  We wrap
-each attempt in a ``signal.alarm``-based timeout (Unix only) and just
-move on if a sim takes too long.
-"""
+# Per-attempt timeout: extremely stiff springs (κ ≳ 10⁶) make the ODE
+# arbitrarily hard, with oscillation periods below μs scale.  We wrap
+# each attempt in a ``signal.alarm``-based timeout (Unix only) and just
+# move on if a sim takes too long.
+# """
 from __future__ import annotations
 
 import argparse
@@ -52,7 +52,61 @@ from pendulum_system import (
 ENABLE_STAR_TOPOLOGY = True      # occasional 7–10 chain hubs on one spring
 ENABLE_CONTRAST_GEOMETRY = True  # mix long-thin and short-stubby chains
 ENABLE_TRAILS = True             # phosphor motion trails on chain tips
-ENABLE_ENERGY_COLOR = True       # colour links by kinetic energy
+ENABLE_ENERGY_COLOR = False       # colour links by kinetic energy
+ENABLE_DRIVEN_RESONANCE = True   # sometimes tune a driven pivot to the
+                                 # chain's own frequency (resonant build-up)
+
+
+def _natural_freq(L: float, g: float = 9.8) -> float:
+    """Fundamental frequency (Hz) of a uniform chain of total length ``L``
+    hanging from a fixed top pivot.
+
+    For a continuous uniform hanging chain the lowest mode is
+        omega_1 = (j0 / 2) * sqrt(g / L),   j0 = 2.4048  (first zero of J0),
+    so f1 = omega_1 / (2*pi).  Good enough to place a resonant drive near
+    the chain's natural swing rate.
+    """
+    L = max(float(L), 1e-6)
+    return (2.4048 / 2.0) * np.sqrt(g / L) / (2.0 * np.pi)
+
+
+def _sample_drive(rng: np.random.Generator, pivot, L: float,
+                  resonance: bool = True, force: bool = False) -> dict:
+    """Sample a sinusoidal pivot-drive spec.
+
+    Amplitudes and frequencies are larger than the original (which capped
+    amp at 2.5 and freq at 0.4 Hz).  When ``resonance`` is on, a fraction
+    of drives (always, if ``force``) are tuned to the chain's own
+    fundamental frequency so it visibly builds up amplitude.  ``force``
+    also guarantees a genuinely moving pivot (used for the "at least one
+    moving pivot per scene" guarantee).
+    """
+    f_nat = _natural_freq(L)
+    if resonance and (force or rng.random() < 0.40):
+        # Resonant drive: match the chain's frequency, moderate amplitude
+        # (energy accumulates on its own, so a huge push can go unstable).
+        f = float(f_nat * rng.uniform(0.9, 1.1))
+        freq_x = freq_y = f
+        amp_main = float(rng.uniform(1.5, 3.2))
+        if rng.random() < 0.5:
+            amp_x, amp_y = amp_main, float(rng.uniform(0.0, 1.0))
+        else:
+            amp_x, amp_y = float(rng.uniform(0.0, 1.0)), amp_main
+    else:
+        # General drive: bigger and faster than before.
+        amp_x = float(rng.uniform(0, 4.5)) if rng.random() < 0.75 else 0.0
+        amp_y = float(rng.uniform(0, 4.5)) if rng.random() < 0.55 else 0.0
+        if force and amp_x < 1.0 and amp_y < 1.0:
+            amp_x = float(rng.uniform(1.5, 4.5))
+        freq_x = float(rng.uniform(0.15, 0.55))
+        freq_y = float(rng.uniform(0.15, 0.55))
+    return {
+        "centre": (float(pivot[0]), float(pivot[1])),
+        "amp": (amp_x, amp_y),
+        "freq": (freq_x, freq_y),
+        "phase": (float(rng.uniform(0, 2 * np.pi)),
+                  float(rng.uniform(0, 2 * np.pi))),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -61,19 +115,25 @@ ENABLE_ENERGY_COLOR = True       # colour links by kinetic energy
 
 def sample_parameters(rng: np.random.Generator,
                       star_topology: bool | None = None,
-                      contrast_geometry: bool | None = None) -> dict:
+                      contrast_geometry: bool | None = None,
+                      driven_resonance: bool | None = None) -> dict:
     """Sample a random-but-reasonable network configuration.
 
     Returns a dict with ``chains``, ``springs``, ``connections`` ready
     to pass straight into ``simulate_network``, plus ``d`` for damping.
 
-    ``star_topology`` / ``contrast_geometry`` default to the module-level
-    ``ENABLE_*`` toggles; pass ``False`` to disable either.
+    ``star_topology`` / ``contrast_geometry`` / ``driven_resonance``
+    default to the module-level ``ENABLE_*`` toggles; pass ``False`` to
+    disable any of them.
+
+    At least one pivot in every scene is always driven (moving).
     """
     if star_topology is None:
         star_topology = ENABLE_STAR_TOPOLOGY
     if contrast_geometry is None:
         contrast_geometry = ENABLE_CONTRAST_GEOMETRY
+    if driven_resonance is None:
+        driven_resonance = ENABLE_DRIVEN_RESONANCE
     n_springs = int(rng.choice([1, 2, 3], p=[0.55, 0.30, 0.15]))
 
     # Spring anchor positions.
@@ -105,6 +165,7 @@ def sample_parameters(rng: np.random.Generator,
 
     chains: list[dict] = []
     connections: list[dict] = []
+    pendant_records: list[tuple] = []   # (chain_idx, pivot, L_eff) per pendant
 
     # ----- Pendant chains hanging off each spring ------------------------- #
     for s_idx, spr in enumerate(springs):
@@ -144,36 +205,44 @@ def sample_parameters(rng: np.random.Generator,
             )
             ci = len(chains)
 
-            # 35% chance the pivot is *driven* — sinusoidally oscillating.
-            # Driving makes the integrator work harder (the system is no
-            # longer autonomous), so we keep frequencies modest.  Drive
-            # period stays ≥ 2.5 s — comfortable for LSODA.
-            chain_dict: dict = {"N": N}
-            if rng.random() < 0.35:
-                amp_x = float(rng.uniform(0, 2.5)) if rng.random() < 0.7 else 0.0
-                amp_y = float(rng.uniform(0, 2.5)) if rng.random() < 0.5 else 0.0
-                freq_x = float(rng.uniform(0.10, 0.40))
-                freq_y = float(rng.uniform(0.10, 0.40))
-                phase_x = float(rng.uniform(0, 2 * np.pi))
-                phase_y = float(rng.uniform(0, 2 * np.pi))
-                chain_dict["pivot_drive"] = {
-                    "centre": pivot,
-                    "amp": (amp_x, amp_y),
-                    "freq": (freq_x, freq_y),
-                    "phase": (phase_x, phase_y),
-                }
-            else:
-                chain_dict["pivot"] = pivot
-            chains.append(chain_dict)
-
             # 35% attach somewhere in the chain's lower half rather than
             # at the tip → trailing tail hangs free below the spring,
-            # adding energy and asymmetry to the motion.
+            # adding energy and asymmetry to the motion.  Decide it first
+            # so we can size a resonant drive to the chain's real length.
             if rng.random() < 0.35:
                 joint = int(rng.integers(N // 2, N))
             else:
                 joint = N
+            # Effective length of the (full, N-link) hanging chain.  The
+            # first ``joint`` links span pivot→anchor (distance ``dist``),
+            # so each link is dist/joint long.
+            l_link = dist / max(joint, 1)
+            L_eff = N * l_link
+
+            # 35% chance the pivot is *driven* — sinusoidally oscillating.
+            # Amplitude/frequency come from _sample_drive (bigger & faster
+            # than before, sometimes tuned to resonance).
+            chain_dict: dict = {"N": N}
+            if rng.random() < 0.35:
+                chain_dict["pivot_drive"] = _sample_drive(
+                    rng, pivot, L_eff, resonance=driven_resonance
+                )
+            else:
+                chain_dict["pivot"] = pivot
+            chains.append(chain_dict)
+            pendant_records.append((ci, pivot, L_eff))
+
             connections.append({"chain": ci, "joint": joint, "spring": s_idx})
+
+    # Guarantee: at least one pivot in every scene is driven (moving).
+    # If sampling produced none, promote a random pendant chain to driven
+    # with a genuinely moving (force=True) drive.
+    if pendant_records and not any("pivot_drive" in ch for ch in chains):
+        ci, piv, L_eff = pendant_records[int(rng.integers(len(pendant_records)))]
+        chains[ci].pop("pivot", None)
+        chains[ci]["pivot_drive"] = _sample_drive(
+            rng, piv, L_eff, resonance=driven_resonance, force=True
+        )
 
     # ----- Bridge chains between pairs of springs ------------------------- #
     # Pick 0..2 inter-spring bridges (only meaningful when n_springs ≥ 2).
@@ -324,6 +393,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Disable occasional 7–10 chain hub topologies")
     p.add_argument("--no-contrast", action="store_true",
                    help="Disable long-thin vs short-stubby geometry mixing")
+    p.add_argument("--no-resonance", action="store_true",
+                   help="Disable tuning driven pivots to chain resonance")
     p.add_argument("--no-trails", action="store_true",
                    help="Disable phosphor motion trails on chain tips")
     p.add_argument("--no-energy-color", action="store_true",
@@ -357,6 +428,7 @@ def main(argv=None) -> int:
             rng,
             star_topology=ENABLE_STAR_TOPOLOGY and not args.no_star,
             contrast_geometry=ENABLE_CONTRAST_GEOMETRY and not args.no_contrast,
+            driven_resonance=ENABLE_DRIVEN_RESONANCE and not args.no_resonance,
         )
         n_springs = len(params["springs"])
         n_chains = len(params["chains"])
