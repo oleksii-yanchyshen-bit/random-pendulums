@@ -43,7 +43,9 @@ from typing import Iterable
 import numpy as np
 from scipy.integrate import solve_ivp
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 from matplotlib.animation import FuncAnimation, PillowWriter, FFMpegWriter
+from matplotlib.collections import LineCollection
 
 
 CHAIN_COLORS = [
@@ -511,8 +513,20 @@ def simulate_network(
 
 def animate_network(result, save_path: str | None = None,
                     fps: int = 24, margin: float = 0.05,
-                    dpi: int = 200, figsize: float = 10.0):
-    """Animate the result of ``simulate_network``."""
+                    dpi: int = 200, figsize: float = 10.0,
+                    trails: bool = True, energy_color: bool = True,
+                    trail_len: int = 25):
+    """Animate the result of ``simulate_network``.
+
+    Two optional visual features (both on by default, both removable):
+
+    ``energy_color`` : colour each link by its kinetic energy — links
+        brighten where they move fast, so you can watch energy flow
+        through the network.  Set ``False`` to fall back to flat
+        per-chain colours.
+    ``trails`` : draw fading "phosphor" trails behind each chain's tip,
+        of length ``trail_len`` frames.  Set ``False`` to disable.
+    """
     chain_data = result["chains"]
     angles_list = result["angles"]
     pivots_list = result["pivots"]
@@ -524,6 +538,34 @@ def animate_network(result, save_path: str | None = None,
     positions = []  # list of (x, y) arrays of shape (N+1, T)
     for cd, ang, piv in zip(chain_data, angles_list, pivots_list):
         positions.append(_link_positions(ang, cd["l"], piv))
+
+    # === FEATURE: energy colour — precompute per-segment kinetic energy ==== #
+    # (Delete this block and set energy_color's branches below to disable.)
+    # Point speeds come from a finite difference of the link positions in
+    # time; per-segment energy ~ mean of its two endpoints' speed².  We
+    # normalise by the 95th percentile so a single spike doesn't wash the
+    # whole scene out.
+    seg_energy = None
+    chain_palette = None
+    if energy_color:
+        t_arr = np.asarray(result["t"], dtype=float)
+        dt = np.gradient(t_arr) if t_arr.size > 1 else np.array([1.0])
+        raw = []
+        for (x, y) in positions:
+            vx = np.gradient(x, axis=1) / dt
+            vy = np.gradient(y, axis=1) / dt
+            sp2 = vx ** 2 + vy ** 2                # (N+1, T)
+            raw.append(0.5 * (sp2[:-1] + sp2[1:]))  # (N, T)
+        scale = np.percentile(np.concatenate([e.ravel() for e in raw]), 95.0)
+        scale = scale if scale > 1e-12 else 1.0
+        seg_energy = [np.clip(e / scale, 0.0, 1.0) for e in raw]
+        chain_palette = []
+        for i in range(K):
+            base = np.array(mcolors.to_rgb(CHAIN_COLORS[i % len(CHAIN_COLORS)]))
+            lo = 0.30 * base                       # dark = slow
+            hi = base + (1.0 - base) * 0.85        # bright = fast
+            chain_palette.append((lo, hi))
+    # ====================================================================== #
 
     # Adaptive square plot box.
     all_x = np.concatenate([px[0].ravel() for px in positions])
@@ -557,12 +599,27 @@ def animate_network(result, save_path: str | None = None,
         ax.scatter(fixed_pivots[:, 0], fixed_pivots[:, 1],
                    s=160, color="black", marker="^", zorder=4)
 
-    # Animated artists.
-    chain_lines = []
+    # Animated artists — chain bodies.
+    # === FEATURE: energy colour — LineCollection instead of flat line ===== #
+    chain_lines = []   # used only when energy_color is False
+    chain_lcs = []     # used only when energy_color is True
     for i in range(K):
         color = CHAIN_COLORS[i % len(CHAIN_COLORS)]
-        (line,) = ax.plot([], [], "-", color=color, lw=2.5)
-        chain_lines.append(line)
+        if energy_color:
+            lc = LineCollection([], linewidths=2.5, zorder=2)
+            ax.add_collection(lc)
+            chain_lcs.append(lc)
+        else:
+            (line,) = ax.plot([], [], "-", color=color, lw=2.5)
+            chain_lines.append(line)
+    # === FEATURE: phosphor trails on chain tips =========================== #
+    trail_lcs = []     # used only when trails is True
+    if trails:
+        for _ in range(K):
+            tlc = LineCollection([], linewidths=1.6, zorder=1)
+            ax.add_collection(tlc)
+            trail_lcs.append(tlc)
+    # ====================================================================== #
 
     # Spring segments: for each spring with ≥ 2 connections, one dashed
     # segment per attached joint going to the spring's centroid.
@@ -590,7 +647,37 @@ def animate_network(result, save_path: str | None = None,
 
     def update(frame):
         for i, (x, y) in enumerate(positions):
-            chain_lines[i].set_data(x[:, frame], y[:, frame])
+            # === FEATURE: energy colour / flat line (see energy_color) ==== #
+            if energy_color:
+                pts = np.stack([x[:, frame], y[:, frame]], axis=1)   # (N+1,2)
+                segs = np.stack([pts[:-1], pts[1:]], axis=1)          # (N,2,2)
+                en = seg_energy[i][:, frame]
+                lo, hi = chain_palette[i]
+                cols = lo[None, :] + (hi - lo)[None, :] * en[:, None]  # (N,3)
+                chain_lcs[i].set_segments(segs)
+                chain_lcs[i].set_color(cols)
+            else:
+                chain_lines[i].set_data(x[:, frame], y[:, frame])
+            # === FEATURE: phosphor trail on this chain's tip ============== #
+            if trails:
+                lo_f = max(0, frame - trail_len)
+                tx = x[-1, lo_f:frame + 1]
+                ty = y[-1, lo_f:frame + 1]
+                if tx.size >= 2:
+                    tpts = np.stack([tx, ty], axis=1)
+                    tsegs = np.stack([tpts[:-1], tpts[1:]], axis=1)
+                    n_seg = tsegs.shape[0]
+                    base = np.array(
+                        mcolors.to_rgb(CHAIN_COLORS[i % len(CHAIN_COLORS)])
+                    )
+                    alphas = np.linspace(0.0, 0.7, n_seg)   # old→new fade-in
+                    tcols = np.concatenate(
+                        [np.tile(base, (n_seg, 1)), alphas[:, None]], axis=1
+                    )
+                    trail_lcs[i].set_segments(tsegs)
+                    trail_lcs[i].set_color(tcols)
+                else:
+                    trail_lcs[i].set_segments([])
 
         # Spring segments + centroids.
         centroid_pts = []
@@ -636,8 +723,11 @@ def animate_network(result, save_path: str | None = None,
         centroids.set_offsets(np.array(centroid_pts) if centroid_pts
                               else np.empty((0, 2)))
 
-        artists = list(chain_lines) + [tips, attach_dots, free_pivot_dots,
-                                       driven_pivot_dots, centroids]
+        artists = list(chain_lcs if energy_color else chain_lines)
+        if trails:
+            artists += trail_lcs
+        artists += [tips, attach_dots, free_pivot_dots,
+                    driven_pivot_dots, centroids]
         for per in spring_segments:
             artists.extend(per)
         return artists

@@ -43,15 +43,37 @@ from pendulum_system import (
 
 
 # --------------------------------------------------------------------------- #
+# Feature toggles                                                             #
+# --------------------------------------------------------------------------- #
+# Each new visual/sampling feature is gated here.  Flip any of these to
+# False (or use the matching --no-* CLI flag) to remove that feature and
+# fall back to the original behaviour.  Deleting a feature entirely is a
+# matter of removing its gated block; nothing else depends on it.
+ENABLE_STAR_TOPOLOGY = True      # occasional 7–10 chain hubs on one spring
+ENABLE_CONTRAST_GEOMETRY = True  # mix long-thin and short-stubby chains
+ENABLE_TRAILS = True             # phosphor motion trails on chain tips
+ENABLE_ENERGY_COLOR = True       # colour links by kinetic energy
+
+
+# --------------------------------------------------------------------------- #
 # Random parameter sampling                                                   #
 # --------------------------------------------------------------------------- #
 
-def sample_parameters(rng: np.random.Generator) -> dict:
+def sample_parameters(rng: np.random.Generator,
+                      star_topology: bool | None = None,
+                      contrast_geometry: bool | None = None) -> dict:
     """Sample a random-but-reasonable network configuration.
 
     Returns a dict with ``chains``, ``springs``, ``connections`` ready
     to pass straight into ``simulate_network``, plus ``d`` for damping.
+
+    ``star_topology`` / ``contrast_geometry`` default to the module-level
+    ``ENABLE_*`` toggles; pass ``False`` to disable either.
     """
+    if star_topology is None:
+        star_topology = ENABLE_STAR_TOPOLOGY
+    if contrast_geometry is None:
+        contrast_geometry = ENABLE_CONTRAST_GEOMETRY
     n_springs = int(rng.choice([1, 2, 3], p=[0.55, 0.30, 0.15]))
 
     # Spring anchor positions.
@@ -89,17 +111,37 @@ def sample_parameters(rng: np.random.Generator) -> dict:
         anchor = spr["anchor"]
         # Bias toward more chains per spring — bigger Y/X/star junctions
         # produce richer collective dynamics than simple pairs.
-        n_chains = int(rng.choice([2, 3, 4, 5], p=[0.25, 0.35, 0.25, 0.15]))
+        # === FEATURE: star/hub topology (star_topology=False to disable) === #
+        # Occasionally make this spring a dense hub of 7–10 chains, whose
+        # collective dynamics are much richer than simple pairs.
+        if star_topology and rng.random() < 0.22:
+            n_chains = int(rng.integers(7, 11))   # 7..10
+        else:
+            n_chains = int(rng.choice([2, 3, 4, 5], p=[0.25, 0.35, 0.25, 0.15]))
+        # =================================================================== #
         base_angle = rng.uniform(0, 2 * np.pi)
         for c in range(n_chains):
             theta = (base_angle + 2 * np.pi * c / n_chains
                      + rng.normal(0, 0.25))
-            dist = rng.uniform(12.0, 20.0)
+            # === FEATURE: contrast geometry (contrast_geometry=False off) == #
+            # Some chains are long & thin, others short & stubby.  Link
+            # length follows from distance / #links, so this also produces
+            # strongly asymmetric link lengths within a single scene.
+            if contrast_geometry and rng.random() < 0.40:
+                if rng.random() < 0.5:
+                    N = int(rng.integers(6, 14))      # short & stubby
+                    dist = rng.uniform(6.0, 11.0)
+                else:
+                    N = int(rng.integers(44, 59))     # long & thin
+                    dist = rng.uniform(16.0, 24.0)
+            else:
+                N = int(rng.integers(20, 41))
+                dist = rng.uniform(12.0, 20.0)
+            # =============================================================== #
             pivot = (
                 anchor[0] + dist * np.cos(theta),
                 anchor[1] + dist * np.sin(theta),
             )
-            N = int(rng.integers(20, 41))
             ci = len(chains)
 
             # 35% chance the pivot is *driven* — sinusoidally oscillating.
@@ -276,6 +318,16 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("-o", "--output", default=None,
                    help="Output animation path (default: pendulum_<timestamp>.mp4)")
     p.add_argument("-V", "--verbose", action="store_true")
+
+    # --- feature switches (all features on by default) ------------------- #
+    p.add_argument("--no-star", action="store_true",
+                   help="Disable occasional 7–10 chain hub topologies")
+    p.add_argument("--no-contrast", action="store_true",
+                   help="Disable long-thin vs short-stubby geometry mixing")
+    p.add_argument("--no-trails", action="store_true",
+                   help="Disable phosphor motion trails on chain tips")
+    p.add_argument("--no-energy-color", action="store_true",
+                   help="Disable kinetic-energy colour coding of links")
     return p.parse_args(argv)
 
 
@@ -301,7 +353,11 @@ def main(argv=None) -> int:
     chosen_params: Optional[dict] = None
 
     for attempt in range(1, args.max_attempts + 1):
-        params = sample_parameters(rng)
+        params = sample_parameters(
+            rng,
+            star_topology=ENABLE_STAR_TOPOLOGY and not args.no_star,
+            contrast_geometry=ENABLE_CONTRAST_GEOMETRY and not args.no_contrast,
+        )
         n_springs = len(params["springs"])
         n_chains = len(params["chains"])
         n_bridges = sum(
@@ -357,6 +413,8 @@ def main(argv=None) -> int:
     fig, _anim, actual_path = animate_network(
         chosen, save_path=out_path,
         fps=args.fps, dpi=args.dpi, figsize=args.figsize,
+        trails=ENABLE_TRAILS and not args.no_trails,
+        energy_color=ENABLE_ENERGY_COLOR and not args.no_energy_color,
     )
     if actual_path != out_path:
         log.warning("Wrote %s instead of %s (ffmpeg unavailable?)",
