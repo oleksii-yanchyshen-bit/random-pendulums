@@ -46,6 +46,8 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.animation import FuncAnimation, PillowWriter, FFMpegWriter
 from matplotlib.collections import LineCollection
+from matplotlib.lines import Line2D
+from datetime import date
 
 
 CHAIN_COLORS = [
@@ -515,8 +517,14 @@ def animate_network(result, save_path: str | None = None,
                     fps: int = 24, margin: float = 0.05,
                     dpi: int = 200, figsize: float = 10.0,
                     trails: bool = True, energy_color: bool = True,
-                    trail_len: int = 25):
+                    trail_len: int = 25,
+                    legend: bool = True, show_date: bool = True,
+                    created: str | None = None):
     """Animate the result of ``simulate_network``.
+
+    ``legend`` draws a key explaining the on-screen elements (only the
+    ones actually present in the scene).  ``show_date`` stamps the
+    creation date in the corner (``created`` overrides it, ISO format).
 
     Two optional visual features (both on by default, both removable):
 
@@ -731,6 +739,60 @@ def animate_network(result, save_path: str | None = None,
         for per in spring_segments:
             artists.extend(per)
         return artists
+
+    # === FEATURE: legend + creation date (legend/show_date to disable) ==== #
+    # Static overlays (drawn once, not animated).  The legend lists only
+    # the element types actually present in this scene.
+    if legend:
+        any_fixed = any((not cd["free_pivot"]) and (not cd["driven"])
+                        for cd in chain_data)
+        any_driven = any(cd["driven"] for cd in chain_data)
+        any_free = any(cd["free_pivot"] for cd in chain_data)
+        any_attach = any(0 < c["joint"] < chain_data[c["chain"]]["N"]
+                         for c in connections)
+        handles = [
+            Line2D([0], [0], color="royalblue", lw=2.5,
+                   label=("chain (brighter = faster)" if energy_color
+                          else "chain")),
+        ]
+        if n_active_springs:
+            handles.append(Line2D([0], [0], color="gray", lw=1.8, ls="--",
+                                  label="spring"))
+        handles.append(Line2D([0], [0], color="crimson", marker="o",
+                              ls="none", ms=9, label="chain tip"))
+        if any_attach:
+            handles.append(Line2D([0], [0], color="orange", marker="o",
+                                  mec="black", ls="none", ms=9,
+                                  label="spring joint"))
+        if any_fixed:
+            handles.append(Line2D([0], [0], color="black", marker="^",
+                                  ls="none", ms=10, label="fixed pivot"))
+        if any_driven:
+            handles.append(Line2D([0], [0], color="black", marker="s",
+                                  ls="none", ms=10, label="driven pivot"))
+        if any_free:
+            handles.append(Line2D([0], [0], color="black", marker="o",
+                                  ls="none", ms=10, label="free pivot"))
+        if n_active_springs:
+            handles.append(Line2D([0], [0], color="dimgray", marker="x",
+                                  ls="none", ms=8, mew=2,
+                                  label="spring centre"))
+        if trails:
+            handles.append(Line2D([0], [0], color="royalblue", lw=1.6,
+                                  alpha=0.5, label="tip trail"))
+        # Place the legend OUTSIDE the plot (to the right) so it never
+        # covers the motion, and reserve a right margin for it.
+        leg = ax.legend(handles=handles, loc="upper left",
+                        bbox_to_anchor=(1.03, 1.0), fontsize=12,
+                        framealpha=0.9, borderpad=0.7, labelspacing=0.4,
+                        handletextpad=0.5)
+        leg.set_zorder(10)
+        fig.subplots_adjust(right=0.72)
+    if show_date:
+        created_str = created or date.today().isoformat()
+        ax.text(0.99, 0.01, f"created {created_str}", transform=ax.transAxes,
+                ha="right", va="bottom", fontsize=12, color="gray")
+    # ===================================================================== #
 
     n_frames = positions[0][0].shape[1]
     anim = FuncAnimation(fig, update, frames=n_frames,

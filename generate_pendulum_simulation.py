@@ -57,6 +57,8 @@ ENABLE_DRIVEN_RESONANCE = True   # sometimes tune a driven pivot to the
                                  # chain's own frequency (resonant build-up)
 ENABLE_ADAPTIVE_DAMPING = True   # raise damping a bit for fast pivot drives
                                  # (tames chaos + integrator cost)
+ENABLE_LEGEND = True             # draw a legend explaining plot elements
+ENABLE_CREATION_DATE = True      # stamp the creation date on the animation
 
 
 def _natural_freq(L: float, g: float = 9.8) -> float:
@@ -431,6 +433,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Disable phosphor motion trails on chain tips")
     p.add_argument("--no-energy-color", action="store_true",
                    help="Disable kinetic-energy colour coding of links")
+    p.add_argument("--no-legend", action="store_true",
+                   help="Disable the element legend on the animation")
+    p.add_argument("--no-date", action="store_true",
+                   help="Disable the creation-date stamp on the animation")
     return p.parse_args(argv)
 
 
@@ -529,6 +535,8 @@ def main(argv=None) -> int:
         fps=args.fps, dpi=args.dpi, figsize=args.figsize,
         trails=ENABLE_TRAILS and not args.no_trails,
         energy_color=ENABLE_ENERGY_COLOR and not args.no_energy_color,
+        legend=ENABLE_LEGEND and not args.no_legend,
+        show_date=ENABLE_CREATION_DATE and not args.no_date,
     )
     if actual_path != out_path:
         log.warning("Wrote %s instead of %s (ffmpeg unavailable?)",
