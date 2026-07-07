@@ -59,6 +59,9 @@ ENABLE_ADAPTIVE_DAMPING = True   # raise damping a bit for fast pivot drives
                                  # (tames chaos + integrator cost)
 ENABLE_LEGEND = True             # draw a legend explaining plot elements
 ENABLE_CREATION_DATE = True      # stamp the creation date on the animation
+ENABLE_MULTIBOB_PENDULUMS = True  # occasional long chains with a few heavy
+                                  # masses inserted along them -> double /
+                                  # triple / multi-bob pendulums
 
 
 def _natural_freq(L: float, g: float = 9.8) -> float:
@@ -121,7 +124,8 @@ def sample_parameters(rng: np.random.Generator,
                       star_topology: bool | None = None,
                       contrast_geometry: bool | None = None,
                       driven_resonance: bool | None = None,
-                      adaptive_damping: bool | None = None) -> dict:
+                      adaptive_damping: bool | None = None,
+                      multibob_pendulums: bool | None = None) -> dict:
     """Sample a random-but-reasonable network configuration.
 
     Returns a dict with ``chains``, ``springs``, ``connections`` ready
@@ -141,6 +145,8 @@ def sample_parameters(rng: np.random.Generator,
         driven_resonance = ENABLE_DRIVEN_RESONANCE
     if adaptive_damping is None:
         adaptive_damping = ENABLE_ADAPTIVE_DAMPING
+    if multibob_pendulums is None:
+        multibob_pendulums = ENABLE_MULTIBOB_PENDULUMS
     n_springs = int(rng.choice([1, 2, 3], p=[0.55, 0.30, 0.15]))
 
     # Spring anchor positions.
@@ -191,11 +197,26 @@ def sample_parameters(rng: np.random.Generator,
         for c in range(n_chains):
             theta = (base_angle + 2 * np.pi * c / n_chains
                      + rng.normal(0, 0.25))
+            masses = None   # None -> uniform link masses (the default)
+            # === FEATURE: multi-bob pendulums (multibob_pendulums=False off) = #
+            # A long chain with a few HEAVY masses inserted along it behaves
+            # like a double / triple pendulum: each heavy "bob" is a
+            # pendulum mass and the light links between them act as the
+            # connecting arms.  Bobs are spaced evenly, the last one at the
+            # tip.  (The renderer marks these masses as large dots.)
+            if multibob_pendulums and rng.random() < 0.25:
+                N = int(rng.integers(24, 46))
+                dist = rng.uniform(12.0, 20.0)
+                k = int(rng.choice([2, 3, 4], p=[0.50, 0.35, 0.15]))  # #bobs
+                masses = np.full(N, 0.25)
+                for j in range(1, k + 1):
+                    idx = min(int(round(N * j / k)) - 1, N - 1)
+                    masses[idx] = float(rng.uniform(3.0, 10.0))
             # === FEATURE: contrast geometry (contrast_geometry=False off) == #
             # Some chains are long & thin, others short & stubby.  Link
             # length follows from distance / #links, so this also produces
             # strongly asymmetric link lengths within a single scene.
-            if contrast_geometry and rng.random() < 0.40:
+            elif contrast_geometry and rng.random() < 0.40:
                 if rng.random() < 0.5:
                     N = int(rng.integers(6, 14))      # short & stubby
                     dist = rng.uniform(6.0, 11.0)
@@ -216,7 +237,10 @@ def sample_parameters(rng: np.random.Generator,
             # at the tip → trailing tail hangs free below the spring,
             # adding energy and asymmetry to the motion.  Decide it first
             # so we can size a resonant drive to the chain's real length.
-            if rng.random() < 0.35:
+            # (Short pendulums, N<3, always attach at the tip: a mid-joint
+            # would be degenerate and hide the double/triple shape.)
+            r_joint = rng.random()
+            if N >= 3 and r_joint < 0.35:
                 joint = int(rng.integers(N // 2, N))
             else:
                 joint = N
@@ -230,6 +254,8 @@ def sample_parameters(rng: np.random.Generator,
             # Amplitude/frequency come from _sample_drive (bigger & faster
             # than before, sometimes tuned to resonance).
             chain_dict: dict = {"N": N}
+            if masses is not None:
+                chain_dict["masses"] = masses
             if rng.random() < 0.35:
                 chain_dict["pivot_drive"] = _sample_drive(
                     rng, pivot, L_eff, resonance=driven_resonance
@@ -429,6 +455,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Disable tuning driven pivots to chain resonance")
     p.add_argument("--no-adaptive-damping", action="store_true",
                    help="Disable raising damping for fast pivot drives")
+    p.add_argument("--no-multibob", action="store_true",
+                   help="Disable multi-bob (double/triple/…) heavy-mass chains")
     p.add_argument("--no-trails", action="store_true",
                    help="Disable phosphor motion trails on chain tips")
     p.add_argument("--no-energy-color", action="store_true",
@@ -469,6 +497,8 @@ def main(argv=None) -> int:
             driven_resonance=ENABLE_DRIVEN_RESONANCE and not args.no_resonance,
             adaptive_damping=(ENABLE_ADAPTIVE_DAMPING
                               and not args.no_adaptive_damping),
+            multibob_pendulums=(ENABLE_MULTIBOB_PENDULUMS
+                                and not args.no_multibob),
         )
         # Skip scenes that are too big to simulate within the per-attempt
         # budget.  Sampling is cheap, so burning an attempt here is far

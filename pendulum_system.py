@@ -653,6 +653,29 @@ def animate_network(result, save_path: str | None = None,
     centroids = ax.scatter([], [], s=80, color="dimgray",
                            marker="x", lw=2.0, zorder=3)
 
+    # === FEATURE: heavy bobs (multi-bob pendulums) ======================== #
+    # Mark masses noticeably heavier than a plain link with a dot the same
+    # size as a chain tip, so a long chain with a few inserted masses reads
+    # as a double/triple pendulum.  No effect on uniform-mass scenes.
+    HEAVY_MASS = 1.0
+    bob_nodes = []   # (chain_idx, row) for interior heavy masses
+    for i, cd in enumerate(chain_data):
+        m = np.asarray(cd["masses"], dtype=float)
+        N = cd["N"]
+        for j in range(N - 1):          # interior nodes sit at row j+1
+            if m[j] > HEAVY_MASS:
+                bob_nodes.append((i, j + 1))
+    any_bobs = bool(bob_nodes)
+    bobs = ax.scatter([], [], s=140, color="crimson", zorder=6)
+    # One fading trail per interior bob (only when trails are enabled).
+    bob_trail_lcs = []
+    if trails:
+        for _ in bob_nodes:
+            btlc = LineCollection([], linewidths=1.6, zorder=1)
+            ax.add_collection(btlc)
+            bob_trail_lcs.append(btlc)
+    # ===================================================================== #
+
     def update(frame):
         for i, (x, y) in enumerate(positions):
             # === FEATURE: energy colour / flat line (see energy_color) ==== #
@@ -731,10 +754,36 @@ def animate_network(result, save_path: str | None = None,
         centroids.set_offsets(np.array(centroid_pts) if centroid_pts
                               else np.empty((0, 2)))
 
+        # Heavy-bob markers (interior heavy masses) + their trails.
+        bob_pts = []
+        for bi, (ci, row) in enumerate(bob_nodes):
+            x, y = positions[ci]
+            bob_pts.append([x[row, frame], y[row, frame]])
+            if trails:
+                lo_f = max(0, frame - trail_len)
+                bx = x[row, lo_f:frame + 1]
+                by = y[row, lo_f:frame + 1]
+                if bx.size >= 2:
+                    bpts = np.stack([bx, by], axis=1)
+                    bsegs = np.stack([bpts[:-1], bpts[1:]], axis=1)
+                    n_seg = bsegs.shape[0]
+                    base = np.array(
+                        mcolors.to_rgb(CHAIN_COLORS[ci % len(CHAIN_COLORS)])
+                    )
+                    alphas = np.linspace(0.0, 0.7, n_seg)
+                    bcols = np.concatenate(
+                        [np.tile(base, (n_seg, 1)), alphas[:, None]], axis=1
+                    )
+                    bob_trail_lcs[bi].set_segments(bsegs)
+                    bob_trail_lcs[bi].set_color(bcols)
+                else:
+                    bob_trail_lcs[bi].set_segments([])
+        bobs.set_offsets(np.array(bob_pts) if bob_pts else np.empty((0, 2)))
+
         artists = list(chain_lcs if energy_color else chain_lines)
         if trails:
-            artists += trail_lcs
-        artists += [tips, attach_dots, free_pivot_dots,
+            artists += trail_lcs + bob_trail_lcs
+        artists += [tips, bobs, attach_dots, free_pivot_dots,
                     driven_pivot_dots, centroids]
         for per in spring_segments:
             artists.extend(per)
@@ -760,6 +809,9 @@ def animate_network(result, save_path: str | None = None,
                                   label="spring"))
         handles.append(Line2D([0], [0], color="crimson", marker="o",
                               ls="none", ms=9, label="chain tip"))
+        if any_bobs:
+            handles.append(Line2D([0], [0], color="crimson", marker="o",
+                                  ls="none", ms=9, label="heavy bob"))
         if any_attach:
             handles.append(Line2D([0], [0], color="orange", marker="o",
                                   mec="black", ls="none", ms=9,
