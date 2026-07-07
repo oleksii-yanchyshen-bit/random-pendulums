@@ -205,8 +205,11 @@ def sample_parameters(rng: np.random.Generator,
             # connecting arms.  Bobs are spaced evenly, the last one at the
             # tip.  (The renderer marks these masses as large dots.)
             if multibob_pendulums and rng.random() < 0.25:
-                N = int(rng.integers(24, 46))
-                dist = rng.uniform(12.0, 20.0)
+                # Longer than a normal chain (more links + bigger reach) so
+                # that even as a double/triple pendulum it spans real space
+                # instead of collapsing into a couple of short rigid sticks.
+                N = int(rng.integers(36, 61))
+                dist = rng.uniform(20.0, 32.0)
                 k = int(rng.choice([2, 3, 4], p=[0.50, 0.35, 0.15]))  # #bobs
                 masses = np.full(N, 0.25)
                 for j in range(1, k + 1):
