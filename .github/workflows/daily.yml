@@ -36,16 +36,21 @@ jobs:
         run: |
           # Worst-case wall time is bounded by max-attempts x attempt-timeout
           # plus one render, and must stay under the job's timeout-minutes
-          # (60).  16 x 100s = ~27 min leaves ample room for render + post.
-          # --t-max keeps each simulation cheap; --max-links skips scenes
-          # too big to simulate within the per-attempt budget.
+          # (60).  10 x 240s = 40 min leaves room for render + post.
+          #
+          # Typical scenes cost ~30-200s to integrate (LSODA falls into
+          # stiff mode and builds dense numerical Jacobians), so the old
+          # 100s budget was a coin flip: runs before 2026-07-17 succeeded
+          # only when an easy scene happened to be sampled early.  A
+          # 240s budget with fewer attempts flips those odds; a tighter
+          # --max-links skips the scenes that would still blow it.
           python generate_pendulum_simulation.py \
               -T "$TG_TOKEN" -N "$TG_CHANNEL" \
               -V \
-              --max-attempts 16 \
-              --attempt-timeout 100 \
+              --max-attempts 10 \
+              --attempt-timeout 240 \
               --t-max 16 \
-              --max-links 360 \
+              --max-links 280 \
               -o animation.mp4
 
       # Upload the produced animation as a workflow artifact so we can
