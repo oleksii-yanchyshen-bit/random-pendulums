@@ -517,7 +517,7 @@ def animate_network(result, save_path: str | None = None,
                     fps: int = 24, margin: float = 0.05,
                     dpi: int = 200, figsize: float = 10.0,
                     trails: bool = True, energy_color: bool = True,
-                    trail_len: int = 25,
+                    trail_len: int = 60,
                     legend: bool = True, show_date: bool = True,
                     created: str | None = None):
     """Animate the result of ``simulate_network``.
