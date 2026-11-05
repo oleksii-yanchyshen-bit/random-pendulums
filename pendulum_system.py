@@ -32,8 +32,9 @@ otherwise just (α₁, …, α_N).  At every step we build the appropriate
 extended (2 + N) × (2 + N) mass matrix per chain, including the
 cross-coupling terms between pivot motion and angles, and solve it.
 
-Energy is conserved to roughly the integrator tolerance — verified
-to 1e-10 with d = 0 on networks with up to 5 chains and 2 springs.
+Undriven networks with d = 0 conserve energy up to integration error.
+Regression tests cover energy conservation with free-pivot bridges and
+trajectory agreement with high-precision reference integrations.
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ from typing import Iterable
 
 import numpy as np
 from scipy.integrate import solve_ivp
+from threadpoolctl import threadpool_limits
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.animation import FuncAnimation, PillowWriter, FFMpegWriter
@@ -154,7 +156,7 @@ def simulate_network(
     d: float = 1.0,
     t_max: float = 10.0,
     n_frames: int = 240,
-    method: str = "LSODA",
+    method: str = "DOP853",
     rtol: float = 1.0e-8,
     atol: float = 1.0e-10,
 ):
@@ -434,11 +436,13 @@ def simulate_network(
                 b_x = float(np.sum(M_hat * l * sin_a * omega ** 2)) - d * pivot_vel[0]
                 b_y = -float(np.sum(M_hat * l * cos_a * omega ** 2)) \
                       - M_eff * g - d * pivot_vel[1]
-                # Spring force directly on pivot (joint=0 connections).
-                if (i, 0) in forces:
-                    F0 = forces[(i, 0)]
-                    b_x += F0[0]
-                    b_y += F0[1]
+                # Translating the pivot translates EVERY attached joint.
+                # Tip/interior spring forces therefore act on it as well.
+                for j in {c["joint"] for c in cd["connections"]}:
+                    F = forces.get((i, j))
+                    if F is not None:
+                        b_x += F[0]
+                        b_y += F[1]
 
                 b_full = np.empty(N + 2)
                 b_full[0] = b_x; b_full[1] = b_y
@@ -468,10 +472,14 @@ def simulate_network(
         # velocities all zero (already)
 
     t_eval = np.linspace(0.0, t_max, n_frames)
-    sol = solve_ivp(
-        deriv, [0.0, t_max], state0,
-        t_eval=t_eval, method=method, rtol=rtol, atol=atol,
-    )
+    # Small per-chain solves are slower when BLAS starts many worker threads.
+    # DOP853 avoids LSODA's repeated dense finite-difference Jacobians while
+    # retaining adaptive error control at the requested tolerances.
+    with threadpool_limits(limits=1, user_api="blas"):
+        sol = solve_ivp(
+            deriv, [0.0, t_max], state0,
+            t_eval=t_eval, method=method, rtol=rtol, atol=atol,
+        )
     if not sol.success:
         raise RuntimeError(f"ODE integration failed: {sol.message}")
     if not np.isfinite(sol.y).all():
@@ -506,6 +514,10 @@ def simulate_network(
         "chains": chain_data,
         "springs": springs,
         "connections": connections,
+        "solver_stats": {
+            "method": method, "nfev": sol.nfev, "njev": sol.njev,
+            "nlu": sol.nlu,
+        },
     }
 
 

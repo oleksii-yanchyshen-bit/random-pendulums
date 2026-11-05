@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import time
@@ -376,39 +377,65 @@ class attempt_timeout:
 # --------------------------------------------------------------------------- #
 
 def post_to_telegram(token: str, channel: str, media_path: str,
-                     caption: str = "") -> None:
+                     caption: str = "", max_attempts: int = 3) -> None:
     """Send the animation file (gif or mp4) to a Telegram channel.
 
-    The default python-telegram-bot timeouts (5 s connect / 5 s read /
-    5 s write) are too short for multi-MB animations on slow uplinks.
-    We bump them to 30 / 120 / 120 s.
+    Allow slow uploads and retry incomplete writes/connections and rate limits.
+    Read timeouts are ambiguous (Telegram may already have posted the video),
+    so they are not retried automatically.
 
     ``send_animation`` accepts both gif and mp4; Telegram converts gifs
     to mp4 internally anyway, so passing mp4 directly avoids double
     encoding and makes uploads dramatically smaller and faster.
     """
     import asyncio
-    import os
+    from datetime import timedelta
+    import httpx
     from telegram import Bot, InputFile
+    from telegram.error import NetworkError, RetryAfter
     from telegram.request import HTTPXRequest
 
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be positive")
+    log = logging.getLogger("pendulum-bot")
+
     async def _send():
-        request = HTTPXRequest(
-            connection_pool_size=1,
-            connect_timeout=30.0,
-            read_timeout=120.0,
-            write_timeout=120.0,
-            pool_timeout=10.0,
-        )
-        bot = Bot(token=token, request=request)
-        with open(media_path, "rb") as fh:
-            await bot.send_animation(
-                chat_id=channel,
-                animation=InputFile(fh, filename=os.path.basename(media_path)),
-                caption=caption,
-                read_timeout=120.0, write_timeout=120.0,
-                connect_timeout=30.0,
+        for attempt in range(1, max_attempts + 1):
+            request = HTTPXRequest(
+                connection_pool_size=1, connect_timeout=30.0,
+                read_timeout=180.0, write_timeout=300.0, pool_timeout=10.0,
             )
+            try:
+                async with Bot(token=token, request=request) as bot:
+                    # Reopen on each try: a failed upload can consume the file.
+                    with open(media_path, "rb") as fh:
+                        await bot.send_animation(
+                            chat_id=channel,
+                            animation=InputFile(fh, filename=os.path.basename(media_path)),
+                            caption=caption,
+                            read_timeout=180.0, write_timeout=300.0,
+                            connect_timeout=30.0,
+                        )
+                return
+            except RetryAfter as exc:
+                delay = exc.retry_after
+                if isinstance(delay, timedelta):
+                    delay = delay.total_seconds()
+                delay = float(delay) + 1.0
+                # Do not let an hours-long rate limit exhaust the CI job.
+                if delay > 300 or attempt == max_attempts:
+                    raise
+            except NetworkError as exc:
+                if attempt == max_attempts or not isinstance(
+                    exc.__cause__, (httpx.ConnectError, httpx.ConnectTimeout,
+                                    httpx.WriteError, httpx.WriteTimeout,
+                                    httpx.PoolTimeout),
+                ):
+                    raise
+                delay = 5.0 * 2 ** (attempt - 1)
+            log.warning("Telegram upload attempt %d/%d failed; retrying in %.0fs",
+                        attempt, max_attempts, delay)
+            await asyncio.sleep(delay)
 
     asyncio.run(_send())
 
@@ -419,17 +446,18 @@ def post_to_telegram(token: str, channel: str, media_path: str,
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("-T", "--token", default=None, help="Telegram bot token")
-    p.add_argument("-N", "--channel", default=None,
+    p.add_argument("-T", "--token", default=os.environ.get("TG_TOKEN"),
+                   help="Telegram bot token (or TG_TOKEN environment variable)")
+    p.add_argument("-N", "--channel", default=os.environ.get("TG_CHANNEL"),
                    help="Telegram channel name (e.g. @my_channel)")
     p.add_argument("--seed", type=int, default=None, help="RNG seed")
 
     p.add_argument("--max-attempts", type=int, default=20,
-                   help="How many random configs to try before giving up")
+                   help="How many simulations to try (size-filtered configs do not count)")
     p.add_argument("--max-links", type=int, default=0,
                    help="Skip sampled scenes whose total link count exceeds "
                         "this (keeps per-attempt sim time bounded). 0 = no cap")
-    p.add_argument("--attempt-timeout", type=int, default=90,
+    p.add_argument("--attempt-timeout", type=int, default=240,
                    help="Per-attempt simulation timeout in seconds (Unix only)")
 
     p.add_argument("--t-max", type=float, default=25.0,
@@ -444,6 +472,8 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     p.add_argument("--rtol", type=float, default=1.0e-7)
     p.add_argument("--atol", type=float, default=1.0e-9)
+    p.add_argument("--method", choices=("DOP853", "LSODA", "Radau", "BDF", "RK45"),
+                   default="DOP853", help="ODE solver (tolerances are unchanged)")
 
     p.add_argument("-o", "--output", default=None,
                    help="Output animation path (default: pendulum_<timestamp>.mp4)")
@@ -468,7 +498,18 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="Disable the element legend on the animation")
     p.add_argument("--no-date", action="store_true",
                    help="Disable the creation-date stamp on the animation")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    for name in ("max_attempts", "t_max", "fps", "dpi", "figsize", "rtol", "atol"):
+        value = getattr(args, name)
+        if not np.isfinite(value) or value <= 0:
+            p.error(f"--{name.replace('_', '-')} must be positive and finite")
+    if args.n_frames < 2:
+        p.error("--n-frames must be at least 2")
+    if args.max_links < 0 or args.attempt_timeout < 0:
+        p.error("--max-links and --attempt-timeout must be non-negative")
+    if bool(args.token) != bool(args.channel):
+        p.error("--token and --channel (or TG_TOKEN and TG_CHANNEL) must be set together")
+    return args
 
 
 def main(argv=None) -> int:
@@ -477,7 +518,7 @@ def main(argv=None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
-    for noisy in ("matplotlib", "PIL", "asyncio", "httpx", "telegram"):
+    for noisy in ("matplotlib", "PIL", "asyncio", "httpx", "httpcore", "telegram"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     log = logging.getLogger("pendulum-bot")
 
@@ -492,7 +533,10 @@ def main(argv=None) -> int:
     chosen: Optional[dict] = None
     chosen_params: Optional[dict] = None
 
-    for attempt in range(1, args.max_attempts + 1):
+    attempt = 0
+    skipped = 0
+    # Sampling is cheap, but an impossible --max-links must still terminate.
+    for sample in range(1, 100 * args.max_attempts + 1):
         params = sample_parameters(
             rng,
             star_topology=ENABLE_STAR_TOPOLOGY and not args.no_star,
@@ -503,14 +547,13 @@ def main(argv=None) -> int:
             multibob_pendulums=(ENABLE_MULTIBOB_PENDULUMS
                                 and not args.no_multibob),
         )
-        # Skip scenes that are too big to simulate within the per-attempt
-        # budget.  Sampling is cheap, so burning an attempt here is far
-        # better than a guaranteed timeout mid-integration.
         total_links = sum(c["N"] for c in params["chains"])
         if args.max_links > 0 and total_links > args.max_links:
-            log.debug("attempt %d: %d links > --max-links %d — skipping",
-                      attempt, total_links, args.max_links)
+            skipped += 1
+            log.debug("sample %d: %d links > --max-links %d — skipping",
+                      sample, total_links, args.max_links)
             continue
+        attempt += 1
         n_springs = len(params["springs"])
         n_chains = len(params["chains"])
         n_bridges = sum(
@@ -526,7 +569,7 @@ def main(argv=None) -> int:
             ", ".join(f"{k:.2e}" for k in kappas),
         )
         try:
-            t0 = time.time()
+            t0 = time.monotonic()
             with attempt_timeout(args.attempt_timeout):
                 result = simulate_network(
                     chains=params["chains"],
@@ -537,14 +580,19 @@ def main(argv=None) -> int:
                     n_frames=args.n_frames,
                     rtol=args.rtol,
                     atol=args.atol,
+                    method=args.method,
                 )
-            sim_dt = time.time() - t0
+            sim_dt = time.monotonic() - t0
         except _SimTimeout:
             log.warning("attempt %d: TIMEOUT after %ds — skipping",
                         attempt, args.attempt_timeout)
+            if attempt == args.max_attempts:
+                break
             continue
         except Exception as exc:
             log.warning("attempt %d simulation failed: %s", attempt, exc)
+            if attempt == args.max_attempts:
+                break
             continue
 
         log.info(
@@ -554,10 +602,13 @@ def main(argv=None) -> int:
         )
         chosen = result
         chosen_params = params
+        log.info("Accepted sample %d, %d links, solver=%s, stats=%s",
+                 sample, total_links, args.method, result.get("solver_stats", {}))
         break
 
     if chosen is None:
-        log.error("All %d attempts timed out or failed.", args.max_attempts)
+        log.error("No usable simulation: %d attempts failed, %d configs skipped "
+                  "by --max-links %d.", attempt, skipped, args.max_links)
         return 1
 
     out_path = args.output or f"pendulum_{int(time.time())}.mp4"

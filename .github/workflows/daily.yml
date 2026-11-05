@@ -5,7 +5,7 @@ name: Daily pendulum
 
 on:
   schedule:
-    # 12:00 UTC daily.  GitHub cron is best-effort: a run may be
+    # 13:50 UTC daily.  GitHub cron is best-effort: a run may be
     # delayed by several minutes during peak hours, occasionally more.
     - cron: "50 13 * * *"
   # Allow manual triggering from the Actions tab — handy for testing.
@@ -14,9 +14,24 @@ on:
 jobs:
   post:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Up to 40 min of integration, plus rendering and bounded upload retries.
+    timeout-minutes: 90
+    env:
+      MPLBACKEND: Agg
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check Telegram configuration
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHANNEL: ${{ secrets.TG_CHANNEL }}
+        run: |
+          if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHANNEL" ]; then
+            echo "::error::Set both TG_TOKEN and TG_CHANNEL repository secrets"
+            exit 1
+          fi
 
       - uses: actions/setup-python@v5
         with:
@@ -29,28 +44,23 @@ jobs:
       - name: Install Python deps
         run: pip install -r requirements.txt
 
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -v
+
       - name: Generate and post
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHANNEL: ${{ secrets.TG_CHANNEL }}
         run: |
-          # Worst-case wall time is bounded by max-attempts x attempt-timeout
-          # plus one render, and must stay under the job's timeout-minutes
-          # (60).  10 x 240s = 40 min leaves room for render + post.
-          #
-          # Typical scenes cost ~30-200s to integrate (LSODA falls into
-          # stiff mode and builds dense numerical Jacobians), so the old
-          # 100s budget was a coin flip: runs before 2026-07-17 succeeded
-          # only when an easy scene happened to be sampled early.  A
-          # 240s budget with fewer attempts flips those odds; a tighter
-          # --max-links skips the scenes that would still blow it.
+          # Size-filtered configurations do not spend an integration attempt.
+          # Keep the same scene limits, tolerances, frames and resolution.
           python generate_pendulum_simulation.py \
-              -T "$TG_TOKEN" -N "$TG_CHANNEL" \
               -V \
               --max-attempts 10 \
               --attempt-timeout 240 \
               --t-max 16 \
               --max-links 280 \
+              --method DOP853 \
               -o animation.mp4
 
       # Upload the produced animation as a workflow artifact so we can
